@@ -1,4 +1,6 @@
 import os
+import re
+import html
 import time
 import streamlit as st
 from google import genai
@@ -39,69 +41,101 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+# ---------- Theme: SACRED GOLD (navy + gold + cream) ----------
 st.markdown(
     """
 <style>
-:root { --accent: #8B84FF; --accent2: #5B9CFF; --glass: rgba(255,255,255,.05); --line: rgba(255,255,255,.10); }
+:root {
+  --gold: #E3BF5C; --gold2: #B8902F; --cream: #F4EBD0; --muted: #B9B2A0;
+  --navy: #0A1128; --card: #131D3B; --line: rgba(227,191,92,.22);
+}
 
-.stApp { background: radial-gradient(900px 520px at 90% -8%, #2B2578 0%, #0B0F1A 62%); }
+.stApp { background: radial-gradient(900px 560px at 90% -8%, #1D2B5E 0%, #0A1128 58%, #060A18 100%); color: var(--cream); }
 header[data-testid="stHeader"] { background: transparent; }
 #MainMenu, footer { visibility: hidden; }
 .block-container { max-width: 760px; padding-top: 2rem; padding-bottom: 7rem; }
+[data-testid="stSidebar"] { background: #0C1530; border-right: 1px solid var(--line); }
+
+/* Make all normal text cream so it is readable */
+.stApp [data-testid="stMarkdownContainer"] p,
+.stApp [data-testid="stMarkdownContainer"] li,
+.stApp [data-testid="stMarkdownContainer"] span,
+.stApp [data-testid="stMarkdownContainer"] strong,
+.stApp [data-testid="stMarkdownContainer"] em,
+.stApp [data-testid="stMarkdownContainer"] h1,
+.stApp [data-testid="stMarkdownContainer"] h2,
+.stApp [data-testid="stMarkdownContainer"] h3,
+.stApp [data-testid="stMarkdownContainer"] h4 { color: var(--cream) !important; }
+.stApp [data-testid="stCaptionContainer"], .stApp [data-testid="stCaptionContainer"] p { color: var(--muted) !important; }
+[data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { color: var(--gold) !important; }
 
 /* Hero */
 .hero { padding: .6rem 0 1.4rem; animation: rise .6s cubic-bezier(.2,.7,.2,1) both; }
-.badge {
+.stApp .hero .badge {
   display: inline-block; font-size: .78rem; font-weight: 600; letter-spacing: .02em;
   padding: .3rem .8rem; border-radius: 999px;
-  background: rgba(139,132,255,.15); border: 1px solid rgba(139,132,255,.35); color: #C9C5FF;
+  background: rgba(227,191,92,.13); border: 1px solid rgba(227,191,92,.4); color: var(--gold) !important;
 }
 .hero h1 {
   font-size: clamp(2.3rem, 9vw, 3.6rem); font-weight: 800; line-height: 1.02;
   letter-spacing: -.04em; margin: .9rem 0 .5rem; padding: 0;
 }
-.hero h1 span {
-  background: linear-gradient(90deg, #B5B0FF, #6EA8FF);
-  -webkit-background-clip: text; background-clip: text; color: transparent;
+.stApp .hero h1 span {
+  background: linear-gradient(90deg, #F3D985, #D9A93A);
+  -webkit-background-clip: text; background-clip: text; color: transparent !important;
 }
-.hero .tag { font-size: 1.1rem; color: #AEB4D6; margin: 0 0 1.1rem; font-style: italic; }
-.verse {
-  background: var(--glass); border: 1px solid var(--line);
-  border-left: 4px solid var(--accent); border-radius: 0 16px 16px 0;
-  padding: .9rem 1.1rem; color: #E4E6F7; line-height: 1.55;
+.stApp .hero .tag { font-size: 1.1rem; color: var(--muted) !important; margin: 0 0 1.1rem; font-style: italic; }
+.hero .verse {
+  background: rgba(255,255,255,.04); border: 1px solid var(--line);
+  border-left: 4px solid var(--gold); border-radius: 0 16px 16px 0;
+  padding: .9rem 1.1rem; color: var(--cream); line-height: 1.55;
 }
-.verse b { color: #C9C5FF; }
-
-.mini { font-size: 1.25rem; font-weight: 800; letter-spacing: -.02em; padding-top: .35rem; }
+.stApp .hero .verse b { color: var(--gold) !important; }
+.mini { font-size: 1.25rem; font-weight: 800; letter-spacing: -.02em; padding-top: .35rem; color: var(--gold); }
 
 @keyframes rise { from { opacity: 0; transform: translateY(14px); } }
 
 /* Buttons and starter chips */
 .stButton > button {
   width: 100%; min-height: 3.2rem; border-radius: 16px;
-  background: var(--glass); border: 1px solid var(--line); color: #EDEFFA;
+  background: rgba(255,255,255,.04); border: 1px solid var(--line); color: var(--cream);
   font-weight: 600; transition: transform .15s, border-color .2s, background .2s;
 }
-.stButton > button:hover { border-color: var(--accent); background: rgba(139,132,255,.14); transform: translateY(-2px); color: #fff; }
+.stButton > button:hover { border-color: var(--gold); background: rgba(227,191,92,.12); transform: translateY(-2px); color: #fff; }
 .stButton > button:active { transform: scale(.98); }
 
-/* Chat bubbles */
+/* ---------- Chat layout: AI on the left, user on the right ---------- */
 [data-testid="stChatMessage"] {
-  background: var(--glass); border: 1px solid var(--line);
-  border-radius: 20px; padding: 1rem 1.1rem; margin-bottom: .8rem;
+  background: var(--card) !important; border: 1px solid var(--line);
+  border-radius: 20px 20px 20px 6px; padding: .9rem 1.1rem; margin: 0 auto .8rem 0;
+  width: fit-content; max-width: 92%;
   animation: rise .4s cubic-bezier(.2,.7,.2,1) both;
 }
+/* the user's messages carry a hidden marker, so we can move them to the right */
+[data-testid="stChatMessage"]:has(.user-marker) {
+  flex-direction: row-reverse; margin: 0 0 .8rem auto;
+  background: linear-gradient(135deg, #F0CF7A, #D4A93E) !important; border: none;
+  border-radius: 20px 20px 6px 20px;
+}
+.stApp [data-testid="stChatMessage"]:has(.user-marker) [data-testid="stMarkdownContainer"] p,
+.stApp [data-testid="stChatMessage"]:has(.user-marker) [data-testid="stMarkdownContainer"] span,
+.stApp [data-testid="stChatMessage"]:has(.user-marker) [data-testid="stMarkdownContainer"] strong,
+.stApp [data-testid="stChatMessage"]:has(.user-marker) [data-testid="stMarkdownContainer"] li { color: #1B1405 !important; }
+.user-marker { display: none; }
+
 [data-testid="stChatMessage"] blockquote {
-  border-left: 4px solid var(--accent); background: rgba(139,132,255,.10);
-  border-radius: 0 12px 12px 0; padding: .5rem 1rem; margin: .6rem 0; color: #E4E6F7;
+  border-left: 4px solid var(--gold); background: rgba(227,191,92,.08);
+  border-radius: 0 12px 12px 0; padding: .5rem 1rem; margin: .6rem 0;
 }
-[data-testid="stChatMessageAvatarUser"], [data-testid="stChatMessageAvatarAssistant"] {
-  background: transparent !important; font-size: 1.3rem;
-}
+[data-testid="stChatMessageAvatarUser"], [data-testid="stChatMessageAvatarAssistant"],
+[data-testid="stChatMessageAvatarCustom"] { background: transparent !important; font-size: 1.3rem; }
 
 /* Input */
-[data-testid="stChatInput"] { border-radius: 999px; border: 1px solid var(--line); background: #151B2E; }
-[data-testid="stChatInput"]:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(139,132,255,.25); }
+[data-testid="stChatInput"] { border-radius: 999px; border: 1px solid var(--line); background: #131D3B; }
+[data-testid="stChatInput"]:focus-within { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(227,191,92,.22); }
+[data-testid="stChatInput"] textarea { color: var(--cream) !important; }
+[data-testid="stChatInput"] textarea::placeholder { color: #8F8A7A !important; }
+[data-testid="stChatInputSubmitButton"] { color: var(--gold) !important; }
 [data-testid="stBottom"] > div { background: transparent; }
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
@@ -138,6 +172,26 @@ def ask(text):
 def new_chat():
     st.session_state.messages = []
     st.session_state.pending = False
+
+
+# ---------- User emoji: starts as 🙂, becomes 👨 or 👩 if the user says so ----------
+_SELF = r"(?:\bi\s*am|\bi['’]m|\bim|\bas)\s+(?:(?!not\b|n['’]t\b)[\w'’-]+\s+){0,3}?"
+MALE_RE = re.compile(_SELF + r"(?:male|man|boy|guy|gentleman|husband|father|dad)\b", re.I)
+FEMALE_RE = re.compile(_SELF + r"(?:female|woman|girl|lady|wife|mother|mom|mum)\b", re.I)
+
+
+def user_avatar():
+    gender = None
+    for m in st.session_state.messages:
+        if m["role"] != "user":
+            continue
+        male = MALE_RE.search(m["text"])
+        female = FEMALE_RE.search(m["text"])
+        if male and not female:
+            gender = "male"
+        elif female and not male:
+            gender = "female"
+    return {"male": "👨", "female": "👩"}.get(gender, "🙂")
 
 
 BUSY_WORDS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "overloaded", "high demand")
@@ -185,7 +239,7 @@ if not st.session_state.messages:
 """,
         unsafe_allow_html=True,
     )
-    st.caption("Tap one to start, or type your own question below.")
+    st.caption("Tap one to start, or type your own message below.")
     cols = st.columns(2)
     for i, (label, prompt) in enumerate(STARTERS):
         cols[i % 2].button(label, key=f"starter{i}", on_click=ask, args=(prompt,))
@@ -195,12 +249,17 @@ else:
     right.button("New chat", key="top_new", on_click=new_chat)
 
 # ---------- Conversation ----------
+me = user_avatar()
 for m in st.session_state.messages:
-    avatar = "🙂" if m["role"] == "user" else "📖"
-    with st.chat_message(m["role"], avatar=avatar):
-        st.markdown(m["text"])
+    if m["role"] == "user":
+        with st.chat_message("user", avatar=me):
+            safe = html.escape(m["text"])
+            st.markdown(f'<span class="user-marker"></span>{safe}', unsafe_allow_html=True)
+    else:
+        with st.chat_message("assistant", avatar="📖"):
+            st.markdown(m["text"])
 
-typed = st.chat_input("Ask a Bible question...")
+typed = st.chat_input("Ask a question or just say hi...")
 if typed:
     ask(typed)
     st.rerun()
