@@ -2,12 +2,14 @@ import os
 import re
 import html
 import time
+import requests
 import streamlit as st
 from google import genai
 from google.genai import types
 
 MODEL = "gemini-3.5-flash"  # if you ever get a model error, change this name
 FALLBACK_MODEL = "gemini-2.5-flash"  # used automatically if the main model is busy or fails
+GROQ_MODELS = ["openai/gpt-oss-120b", "qwen/qwen3.6-27b"]  # backup AI (Groq), tried in order
 
 def load_rules():
     """Read the AI's rules from rules.txt (lines starting with # are ignored)."""
@@ -144,18 +146,24 @@ header[data-testid="stHeader"] { background: transparent; }
     unsafe_allow_html=True,
 )
 
-# ---------- API key ----------
-api_key = os.environ.get("GEMINI_API_KEY")
-if not api_key:
-    try:
-        api_key = st.secrets["GEMINI_API_KEY"]
-    except Exception:
-        api_key = None
+# ---------- API keys ----------
+def get_secret(name):
+    value = os.environ.get(name)
+    if not value:
+        try:
+            value = st.secrets[name]
+        except Exception:
+            value = None
+    return value
+
+
+api_key = get_secret("GEMINI_API_KEY")
 if not api_key:
     st.error("API key not found. Add a secret named GEMINI_API_KEY in your app settings.")
     st.stop()
 
 client = genai.Client(api_key=api_key)
+groq_key = get_secret("GROQ_API_KEY")  # optional backup
 
 # ---------- State ----------
 if "messages" not in st.session_state:
@@ -194,13 +202,41 @@ def user_avatar():
     return {"male": "👨", "female": "👩"}.get(gender, "🙂")
 
 
-BUSY_WORDS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "overloaded", "high demand")
+BUSY_WORDS = ("503", "UNAVAILABLE", "overloaded", "high demand")
+
+
+def groq_generate():
+    """Backup AI: Groq. Used when Gemini is busy or out of free requests."""
+    if not groq_key:
+        return None
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + [
+        {"role": "user" if m["role"] == "user" else "assistant", "content": m["text"]}
+        for m in st.session_state.messages
+    ]
+    for model in GROQ_MODELS:
+        try:
+            r = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {groq_key}"},
+                json={"model": model, "messages": messages, "temperature": 0.6},
+                timeout=45,
+            )
+            if r.status_code == 200:
+                text = (r.json()["choices"][0]["message"].get("content") or "")
+                text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+                if text:
+                    return text
+            else:
+                print(f"[Berean] Groq {model} failed: {r.status_code} {r.text[:200]}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[Berean] Groq {model} error: {e}")
+    return None
 
 
 def generate(contents):
-    """Try the main model, retry when it is busy, then try the backup model."""
+    """Try Gemini, then the backup Gemini model, then Groq."""
     for model in (MODEL, FALLBACK_MODEL):
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 response = client.models.generate_content(
                     model=model,
@@ -213,10 +249,10 @@ def generate(contents):
             except Exception as e:  # noqa: BLE001
                 print(f"[Berean] {model} attempt {attempt + 1} failed: {e}")
                 if any(w in str(e) for w in BUSY_WORDS):
-                    time.sleep(2 * (attempt + 1))  # busy: wait a little and retry
+                    time.sleep(1.5)  # briefly busy: wait a moment and retry
                     continue
-                break  # not a busy error: move on to the backup model
-    return None
+                break  # out of free requests or another error: move on right away
+    return groq_generate()
 
 
 # ---------- Sidebar ----------
