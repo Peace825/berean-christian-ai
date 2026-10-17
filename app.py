@@ -10,6 +10,7 @@ from google.genai import types
 MODEL = "gemini-3.5-flash"  # if you ever get a model error, change this name
 FALLBACK_MODEL = "gemini-2.5-flash"  # used automatically if the main model is busy or fails
 GROQ_MODELS = ["openai/gpt-oss-120b", "qwen/qwen3.6-27b"]  # backup AI (Groq), tried in order
+FIRST_AI = "groq"  # which AI answers first: "groq" or "gemini". The other one is the backup.
 
 def load_rules():
     """Read the AI's rules from rules.txt (lines starting with # are ignored)."""
@@ -233,8 +234,8 @@ def groq_generate():
     return None
 
 
-def generate(contents):
-    """Try Gemini, then the backup Gemini model, then Groq."""
+def gemini_generate(contents):
+    """Gemini: main model, then the backup Gemini model."""
     for model in (MODEL, FALLBACK_MODEL):
         for attempt in range(2):
             try:
@@ -252,7 +253,14 @@ def generate(contents):
                     time.sleep(1.5)  # briefly busy: wait a moment and retry
                     continue
                 break  # out of free requests or another error: move on right away
-    return groq_generate()
+    return None
+
+
+def generate(contents):
+    """Ask the first AI, and use the other one as the backup."""
+    if FIRST_AI == "groq":
+        return groq_generate() or gemini_generate(contents)
+    return gemini_generate(contents) or groq_generate()
 
 
 # ---------- Sidebar ----------
