@@ -1,9 +1,11 @@
 import os
 import re
+import json
 import html
 import time
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from google import genai
 from google.genai import types
 
@@ -275,6 +277,41 @@ def generate(contents):
     return gemini_generate(contents) or groq_generate()
 
 
+def transcribe(audio_bytes):
+    """Turn a voice recording into text. Groq Whisper first, Gemini as backup."""
+    if groq_key:
+        try:
+            r = requests.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {groq_key}"},
+                files={"file": ("voice.wav", audio_bytes, "audio/wav")},
+                data={"model": "whisper-large-v3-turbo"},
+                timeout=60,
+            )
+            if r.status_code == 200:
+                text = (r.json().get("text") or "").strip()
+                if text:
+                    return text
+            else:
+                print(f"[Berean] Groq transcription failed: {r.status_code} {r.text[:200]}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[Berean] Groq transcription error: {e}")
+    for model in (MODEL, FALLBACK_MODEL):
+        try:
+            resp = client.models.generate_content(
+                model=model,
+                contents=[
+                    types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav"),
+                    "Transcribe this audio exactly. Reply with only the words that were spoken.",
+                ],
+            )
+            if resp.text and resp.text.strip():
+                return resp.text.strip()
+        except Exception as e:  # noqa: BLE001
+            print(f"[Berean] Gemini transcription ({model}) error: {e}")
+    return None
+
+
 # ---------- Sidebar ----------
 with st.sidebar:
     st.header("📖 Berean Christian AI")
@@ -329,6 +366,31 @@ def typewriter(text):
         time.sleep(delay)
 
 
+def listen_button(text):
+    """A free 'Listen' button that reads the answer aloud using the phone's own voice."""
+    speak = re.sub(r"[*_#>`\[\]]", "", text)
+    speak = re.sub(r"\s+", " ", speak).strip()
+    payload = json.dumps(speak).replace("</", "<\\/")
+    components.html(
+        """
+<button id="b" style="background:rgba(227,191,92,.13);border:1px solid rgba(227,191,92,.4);color:#E3BF5C;
+border-radius:999px;padding:6px 14px;font-size:14px;cursor:pointer;font-family:sans-serif">🔊 Listen</button>
+<script>
+const t = __TEXT__;
+const b = document.getElementById('b');
+b.onclick = () => {
+  const s = window.speechSynthesis;
+  if (s.speaking) { s.cancel(); b.textContent = '🔊 Listen'; return; }
+  const u = new SpeechSynthesisUtterance(t);
+  u.onend = () => { b.textContent = '🔊 Listen'; };
+  b.textContent = '⏹ Stop';
+  s.speak(u);
+};
+</script>""".replace("__TEXT__", payload),
+        height=44,
+    )
+
+
 def show_followups(index, questions):
     if not questions:
         return
@@ -347,8 +409,24 @@ for idx, m in enumerate(st.session_state.messages):
     else:
         with st.chat_message("assistant", avatar="📖"):
             st.markdown(m["text"])
+        if idx >= len(st.session_state.messages) - 8:
+            listen_button(m["text"])
         if idx == last and not st.session_state.pending:
             show_followups(idx, m.get("next", []))
+
+if "voice_n" not in st.session_state:
+    st.session_state.voice_n = 0
+with st.expander("🎤 Speak instead of typing"):
+    clip = st.audio_input("Tap the mic, speak, then tap stop", key=f"voice{st.session_state.voice_n}")
+if clip is not None and not st.session_state.pending:
+    with st.spinner("Listening..."):
+        spoken = transcribe(clip.getvalue())
+    st.session_state.voice_n += 1
+    if spoken:
+        ask(spoken)
+        st.rerun()
+    else:
+        st.warning("I could not hear that clearly. Please try again.")
 
 typed = st.chat_input("Ask a question or just say hi...")
 if typed:
@@ -374,4 +452,6 @@ if st.session_state.pending:
             st.write_stream(typewriter(clean))
     st.session_state.messages.append({"role": "assistant", "text": clean, "next": nexts})
     st.session_state.pending = False
+    if raw is not None:
+        listen_button(clean)
     show_followups(len(st.session_state.messages) - 1, nexts)
