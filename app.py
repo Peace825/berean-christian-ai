@@ -29,7 +29,19 @@ def load_rules():
     )
 
 
-SYSTEM_PROMPT = load_rules()
+FOLLOWUP_RULE = """
+
+FOLLOW-UP QUESTIONS (technical format rule):
+At the very end of a reply to a Bible or faith question, add exactly 3 short follow-up questions
+the person might want to ask next. Put each on its own line, starting with [[Q]] and nothing else
+on that line, for example:
+[[Q]] What does this verse mean for my daily life?
+Keep each under 10 words. Never mention or explain these lines.
+Do NOT add them for simple replies like "ok", "thanks", "hi", or when the person seems to be
+hurting or in crisis.
+"""
+
+SYSTEM_PROMPT = load_rules() + FOLLOWUP_RULE
 
 STARTERS = [
     ("🧠 Memory verse", "Give me a memory verse to learn today."),
@@ -293,8 +305,41 @@ else:
     right.button("New chat", key="top_new", on_click=new_chat)
 
 # ---------- Conversation ----------
+def split_followups(text):
+    """Separate the answer from the [[Q]] follow-up lines."""
+    keep, qs = [], []
+    for ln in text.rstrip().split("\n"):
+        s = ln.strip()
+        if s.startswith("[[Q]]"):
+            q = s[5:].strip()
+            if q:
+                qs.append(q)
+        else:
+            keep.append(ln)
+    clean = "\n".join(keep).rstrip()
+    return (clean or text.strip()), qs[:3]
+
+
+def typewriter(text):
+    """Make the answer appear word by word."""
+    parts = re.split(r"(\s+)", text)
+    delay = min(0.025, 3.5 / max(len(parts), 1))
+    for p in parts:
+        yield p
+        time.sleep(delay)
+
+
+def show_followups(index, questions):
+    if not questions:
+        return
+    st.caption("Tap to continue:")
+    for i, q in enumerate(questions):
+        st.button(q, key=f"fu_{index}_{i}", on_click=ask, args=(q,))
+
+
 me = user_avatar()
-for m in st.session_state.messages:
+last = len(st.session_state.messages) - 1
+for idx, m in enumerate(st.session_state.messages):
     if m["role"] == "user":
         with st.chat_message("user", avatar=me):
             safe = html.escape(m["text"])
@@ -302,6 +347,8 @@ for m in st.session_state.messages:
     else:
         with st.chat_message("assistant", avatar="📖"):
             st.markdown(m["text"])
+        if idx == last and not st.session_state.pending:
+            show_followups(idx, m.get("next", []))
 
 typed = st.chat_input("Ask a question or just say hi...")
 if typed:
@@ -318,9 +365,13 @@ if st.session_state.pending:
     ]
     with st.chat_message("assistant", avatar="📖"):
         with st.spinner("Searching the Scriptures..."):
-            answer = generate(contents)
-        if answer is None:
-            answer = "The AI is very busy right now. Please wait a few seconds and ask again."
-        st.markdown(answer)
-    st.session_state.messages.append({"role": "assistant", "text": answer})
+            raw = generate(contents)
+        if raw is None:
+            clean, nexts = "The AI is very busy right now. Please wait a few seconds and ask again.", []
+            st.markdown(clean)
+        else:
+            clean, nexts = split_followups(raw)
+            st.write_stream(typewriter(clean))
+    st.session_state.messages.append({"role": "assistant", "text": clean, "next": nexts})
     st.session_state.pending = False
+    show_followups(len(st.session_state.messages) - 1, nexts)
