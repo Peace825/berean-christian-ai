@@ -366,6 +366,74 @@ def typewriter(text):
         time.sleep(delay)
 
 
+# ---------- Verified verses (real KJV text from bible-api.com) ----------
+_NUMBERED = r"[123]\s?(?:Samuel|Kings|Chronicles|Corinthians|Thessalonians|Timothy|Peter|John)"
+_PLAIN = (
+    "Genesis|Exodus|Leviticus|Numbers|Deuteronomy|Joshua|Judges|Ruth|Ezra|Nehemiah|Esther|Job|"
+    "Psalms|Psalm|Proverbs|Ecclesiastes|Song of Solomon|Song of Songs|Isaiah|Jeremiah|Lamentations|"
+    "Ezekiel|Daniel|Hosea|Joel|Amos|Obadiah|Jonah|Micah|Nahum|Habakkuk|Zephaniah|Haggai|Zechariah|"
+    "Malachi|Matthew|Mark|Luke|John|Acts|Romans|Galatians|Ephesians|Philippians|Colossians|Titus|"
+    "Philemon|Hebrews|James|Jude|Revelation"
+)
+REF_RE = re.compile(
+    r"\b((?:" + _NUMBERED + r")|(?:" + _PLAIN + r"))\s+(\d{1,3}):(\d{1,3})(?:\s*[-\u2013]\s*(\d{1,3}))?\b",
+    re.I,
+)
+
+
+def extract_refs(text, limit=6):
+    """Find Bible references like John 3:16 or Exodus 20:8-11 in an answer."""
+    refs, seen = [], set()
+    for m in REF_RE.finditer(text):
+        book, chap, v1, v2 = m.group(1), m.group(2), m.group(3), m.group(4)
+        if v2 and (int(v2) < int(v1) or int(v2) - int(v1) > 11):
+            continue  # skip reversed or very long ranges
+        book_clean = re.sub(r"\s+", " ", book)
+        ref = f"{book_clean} {chap}:{v1}" + (f"-{v2}" if v2 else "")
+        if ref.lower() not in seen:
+            seen.add(ref.lower())
+            refs.append(ref)
+        if len(refs) >= limit:
+            break
+    return refs
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 30)
+def fetch_kjv(ref):
+    """Get the real KJV text. Failures raise an error, so they are not saved in the cache."""
+    r = requests.get(
+        "https://bible-api.com/" + requests.utils.quote(ref),
+        params={"translation": "kjv"},
+        timeout=10,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"bible-api {r.status_code}")
+    data = r.json()
+    verse_text = re.sub(r"\s+", " ", data.get("text", "")).strip()
+    if not verse_text:
+        raise RuntimeError("empty verse")
+    return data.get("reference", ref), verse_text
+
+
+def get_verified(text):
+    found = []
+    for ref in extract_refs(text):
+        try:
+            found.append(fetch_kjv(ref))
+        except Exception as e:  # noqa: BLE001
+            print(f"[Berean] could not verify {ref}: {e}")
+    return found
+
+
+def show_verified(found):
+    if not found:
+        return
+    with st.expander(f"✅ Verified KJV text ({len(found)})"):
+        for name, verse_text in found:
+            st.markdown(f"**{name}**\n\n> {verse_text}")
+        st.caption("Verse text from bible-api.com (King James Version).")
+
+
 def listen_button(text):
     """A free 'Listen' button that reads the answer aloud using the phone's own voice."""
     speak = re.sub(r"[*_#>`\[\]]", "", text)
@@ -411,26 +479,39 @@ for idx, m in enumerate(st.session_state.messages):
             st.markdown(m["text"])
         if idx >= len(st.session_state.messages) - 8:
             listen_button(m["text"])
+        show_verified(get_verified(m["text"]))
         if idx == last and not st.session_state.pending:
             show_followups(idx, m.get("next", []))
 
-if "voice_n" not in st.session_state:
-    st.session_state.voice_n = 0
-with st.expander("🎤 Speak instead of typing"):
-    clip = st.audio_input("Tap the mic, speak, then tap stop", key=f"voice{st.session_state.voice_n}")
-if clip is not None and not st.session_state.pending:
+def read_chat_value(v):
+    """Return (text, audio) from the chat box, which may hold typed text and/or a voice recording."""
+    if v is None:
+        return None, None
+    if isinstance(v, str):
+        return v, None
+    text = getattr(v, "text", None)
+    audio = getattr(v, "audio", None)
+    if hasattr(v, "get"):
+        text = text or v.get("text")
+        audio = audio or v.get("audio")
+    return text, audio
+
+
+try:
+    typed = st.chat_input("Ask a question or just say hi...", accept_audio=True)  # mic beside send
+except TypeError:  # older Streamlit without the built-in mic
+    typed = st.chat_input("Ask a question or just say hi...")
+
+text, audio = read_chat_value(typed)
+if audio is not None:
     with st.spinner("Listening..."):
-        spoken = transcribe(clip.getvalue())
-    st.session_state.voice_n += 1
+        spoken = transcribe(audio.getvalue())
     if spoken:
-        ask(spoken)
-        st.rerun()
+        text = spoken
     else:
         st.warning("I could not hear that clearly. Please try again.")
-
-typed = st.chat_input("Ask a question or just say hi...")
-if typed:
-    ask(typed)
+if text:
+    ask(text)
     st.rerun()
 
 if st.session_state.pending:
@@ -454,4 +535,7 @@ if st.session_state.pending:
     st.session_state.pending = False
     if raw is not None:
         listen_button(clean)
+        with st.spinner("Verifying verses..."):
+            found = get_verified(clean)
+        show_verified(found)
     show_followups(len(st.session_state.messages) - 1, nexts)
