@@ -375,7 +375,27 @@ def reload_live():
     st.session_state.draft = rows[0]["content"] if rows else read_rules_file_raw()
 
 
+def change_summary(old, new):
+    """How many lines were added and removed compared to the live rules."""
+    added = removed = 0
+    for ln in difflib.ndiff((old or "").splitlines(), (new or "").splitlines()):
+        if ln.startswith("+ "):
+            added += 1
+        elif ln.startswith("- "):
+            removed += 1
+    return added, removed
+
+
+def ask_publish():
+    st.session_state.confirm_publish = True
+
+
+def cancel_publish():
+    st.session_state.confirm_publish = False
+
+
 def publish_rules():
+    st.session_state.confirm_publish = False
     text = (st.session_state.get("draft") or "").strip()
     if len(text) < 20:
         st.session_state.admin_msg = ("err", "The rules are too short to publish.")
@@ -401,7 +421,7 @@ def publish_rules():
 
 
 def sign_out():
-    for k in ("admin", "draft", "test_msgs", "admin_msg"):
+    for k in ("admin", "draft", "test_msgs", "admin_msg", "confirm_publish"):
         st.session_state.pop(k, None)
 
 
@@ -462,19 +482,44 @@ def render_admin():
         if "test_msgs" not in st.session_state:
             st.session_state.test_msgs = []
 
+        versions = sb_versions(10)
+
         note = st.session_state.pop("admin_msg", None)
         if note:
             (st.success if note[0] == "ok" else st.error)(note[1])
 
-        t_rules, t_test, t_hist, t_fb = st.tabs(["✏️ Rules", "🧪 Test", "🕘 History", "👍 Feedback"])
+        t_rules, t_test, t_hist, t_fb, t_help = st.tabs(["✏️ Rules", "🧪 Test", "🕘 History", "👍 Feedback", "❓ Help"])
 
         with t_rules:
+            if versions:
+                v0 = versions[0]
+                st.caption(
+                    f"🟢 Live now: version {v0['id']} · published by {v0.get('created_by') or 'unknown'} "
+                    f"· {_when(v0.get('created_at'))} UTC"
+                )
+            else:
+                st.caption("Nothing published yet. The app is using rules.txt.")
             st.text_area("Rules (the AI follows these)", key="draft", height=420)
-            st.caption("Lines that start with # are notes for you. Nothing goes live until you tap Publish.")
-            c1, c2, c3 = st.columns(3)
-            c1.button("✅ Publish", on_click=publish_rules, type="primary")
-            c2.button("↩️ Reload live", on_click=reload_live)
-            c3.button("📄 From rules.txt", on_click=set_draft, args=(read_rules_file_raw(),))
+            st.caption("Lines that start with # are notes for you. Nothing goes live until you publish.")
+            if st.session_state.get("confirm_publish"):
+                live_text = versions[0]["content"] if versions else ""
+                added, removed = change_summary(live_text, st.session_state.get("draft", ""))
+                if versions and added == 0 and removed == 0:
+                    st.info("There are no changes compared to the live rules, so there is nothing to publish.")
+                    st.button("OK", on_click=cancel_publish)
+                else:
+                    st.warning(
+                        f"Publish these rules as {adm['email']}? About {added} line(s) added and "
+                        f"{removed} removed. Everyone using the AI will get them within a minute."
+                    )
+                    y, n = st.columns(2)
+                    y.button("✅ Yes, publish", on_click=publish_rules, type="primary")
+                    n.button("Cancel", on_click=cancel_publish)
+            else:
+                c1, c2, c3 = st.columns(3)
+                c1.button("✅ Publish", on_click=ask_publish, type="primary")
+                c2.button("↩️ Reload live", on_click=reload_live)
+                c3.button("📄 From rules.txt", on_click=set_draft, args=(read_rules_file_raw(),))
 
         with t_test:
             st.caption("Chat with the AI using the draft rules from the Rules tab. Nothing is published.")
@@ -501,11 +546,10 @@ def render_admin():
             st.button("Clear test chat", on_click=clear_test)
 
         with t_hist:
-            versions = sb_versions(10)
             if not versions:
                 st.info("No published versions yet. Tap Publish on the Rules tab to save the first one.")
             for i, v in enumerate(versions):
-                label = f"Version {v['id']} · {_when(v.get('created_at'))} · {v.get('created_by') or ''}"
+                label = f"Version {v['id']} · {v.get('created_by') or 'unknown'} · {_when(v.get('created_at'))} UTC"
                 with st.expander(("🟢 LIVE · " if i == 0 else "") + label):
                     st.text(v["content"])
                     st.button(
@@ -532,6 +576,50 @@ def render_admin():
                     icon = "👍" if x["rating"] == "up" else "👎"
                     with st.expander(f"{icon} rules v{x.get('rules_version') or '?'} · {_when(x.get('created_at'))}"):
                         st.write(x.get("answer") or "")
+        with t_help:
+            st.markdown(
+                """
+**How this page works**
+
+1. **✏️ Rules:** edit the rules in the big box. Nothing is live yet.
+2. **🧪 Test:** chat with the AI using your draft. Try several questions.
+3. **✅ Publish:** when you are happy, tap Publish, then **Yes, publish**. Everyone gets the new rules within about a minute.
+4. **🕘 History:** made a mistake? Open an older version, tap **Load into editor**, then publish it again.
+
+**How to write good rules**
+
+- One idea per rule, in short, clear sentences, like instructions to a new helper.
+- Say what to **do**, not only what to avoid.
+- Give an example when you can, like: `When someone says thanks, reply warmly in one short sentence.`
+- Change **one rule at a time**, then test it.
+- Lines that start with `#` are notes for you. The AI ignores them.
+
+**Good test questions**
+
+- A normal Bible question. (Is the answer clear and accurate?)
+- "Hi, how are you?" (Is the tone friendly?)
+- "ok" or "thanks". (Is the reply short, with no extra verse?)
+- Something outside the Bible. (Does it decline kindly?)
+- Something sad, like "I feel like giving up." (Does it respond with care and point to real help?)
+
+**Please do not**
+
+- Remove the care-for-hurting-people rule.
+- Share your password, or sign in on a phone you do not trust.
+- Publish without testing first.
+
+**Things that work by themselves**
+
+The follow-up question buttons, the related verses, the verified KJV verse cards, and the word study cards are built into the app. They do not need rules, and editing the rules will not break them.
+
+**If something goes wrong**
+
+- *Session expired:* just sign in again.
+- *Could not publish:* your email may not be on the admins list. Ask the owner.
+- *The AI is busy:* the free AI limit was reached. Wait a minute and try again.
+- *Not sure about a change:* use **History** to go back to an older version.
+"""
+            )
     except PermissionError:
         st.warning("Your session expired. Please sign in again.")
         sign_out()
